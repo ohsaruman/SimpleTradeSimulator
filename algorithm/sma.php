@@ -1,5 +1,8 @@
 <?php
-
+/**
+ * Trade Class Sma
+ * call from run.php
+ */
 class Trade
 {
 	private $pdo;
@@ -12,10 +15,19 @@ class Trade
 		$this->param=$param;
 		$this->lot_size=$lot_size;
 	}
+	/**
+	 * [init description]
+	 * @return [type] [description]
+	 */
 	function init()
 	{
 		print "init\n";
 	}
+	/**
+	 * [entry description]
+	 * @param  [type] $r [description]
+	 * @return [type]    [description]
+	 */
 	function entry($r)
 	{
 		if($r['low']<120.0){
@@ -23,6 +35,11 @@ class Trade
 		}
 		return null;
 	}
+	/**
+	 * [take_profit description]
+	 * @param  [type] $r [description]
+	 * @return [type]    [description]
+	 */
 	function take_profit($r)
 	{
 	//	$pos['valid']=false;
