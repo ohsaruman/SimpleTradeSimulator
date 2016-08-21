@@ -8,7 +8,7 @@ config.txt
  database['user']= ""
  databsse['pass'] = ""
  databsse['name'] = ""
- database['table'="rate"
+ database['table']="rate"
 
 
 create table price data like this
