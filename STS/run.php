@@ -2,16 +2,9 @@
 /**
  *
  */
-if(count($argv)<7){
-	die("
-		NOT enough paramaters
-		Require args like this:
-			code from_date to_date deposit spread entry_steratgy exit_sterategy
-\n");
-}else{
-	main($argv);
-}
-
+//レバレッジの実装は後回し　たぶん不要
+// ロットサイズも後回し　オーダー時に自分で調整すれ
+////
 /**
  *  Broker Class
  */
@@ -21,39 +14,63 @@ class Broker
 	public $positions;
 	private $pos_serial;
 	public $deposit;
-	public $lot_size;
 	public $orders;
-	public function __construct($spread,$deposit,$lot_size)
+	public $error;
+	public function __construct($spread,$deposit)
 	{
 		$this->spread =$spread;
 		$this->pos_serial=0;
 		$this->positions=array();
 		$this->deposit=$deposit;
-		$this->lot_size=$lot_size;
 		$this->orders=array();
+		$this->error='';
 	}
 	/**
-	 * 指定の値段で買えますか
-	 * @param [type] $p    [description]
-	 * @param [type] $low  [description]
-	 * @param [type] $high [description]
+	 * 指定の値段で買えますか nullで成り行き
+	 * @param float $p    order price or null
+	 * @param float $r    record tick price
+	 * @return float or null
 	 */
-	function Can_I_Buy($p,$low,$high){
+	function Can_I_Buy($p,$r){
 		if($p){
-			if($p>$low){
-				if($p>$high){//そこまで高くなくても買える
-					return $high;
+			if($p>$r['low']){
+				if($p>$r['high']){// orer price higher than high price
+					$ret=$r['high'];
 				}else{
-					return $p;//指定した値段で買える
+					$ret=$p; //order price
 				}
 			}else {
-				print "FALSE";
-				return false;
+				$ret=false;
 			}
 		}else{
-			return $high; //成り行き
+			$ret=$r['open'];
 		}
+		return $ret;//market price
 	}
+	/**
+	 * 指定の値段で売れますか nullで成り行き
+	 * @param float $p    order price or null
+	 * @param float $r    record tick price
+	 * @return float or null
+	 */
+	function Can_I_Sell($p,$r){
+		if($p){
+			if($p<$r['high']){
+				if($p<$r['low']){// orer price lower than low price
+					$ret=$r['low'];
+				}else{
+					$ret=$p; //order price
+				}
+			}else {
+				$ret=false;
+			}
+		}else{
+			$ret=$r['open'];//market price worst case
+		}
+		return $ret;
+	}
+
+
 	/**
 	 * open new position
 	 * @param  string $order  Order data
@@ -63,55 +80,295 @@ class Broker
 	 */
 	function open_position($order,$record)
 	{
-		if($order['operate'] == 'Buy'){
-			if($price = $this->Can_I_Buy($order['price'],$record['low'],$record['high'])){
-				$buy_size=$order['lot']*$this->lot_size;
+		if($order['operate'] == 'BUY'){
+			if($price = $this->Can_I_Buy($order['price'],$record)){
+				$buy_size=$order['amount'];
 				if(($price+$this->spread)*$buy_size < $this->deposit){
 					$pos=array();
 					$pos['entry_price']=$price+$this->spread;//スプレッド分購入価格に上乗せ
-					$pos['lc_price']=$price-$order['lc_price'];
-					$pos['dir']='L';
+					$pos['dir']='LONG';
 					$pos['size']=$buy_size;
-					$pos['open_time']=$record['dt'];
+					$pos['entry_time']=$record['dt'];
 					$pos['valid']=true;
 					$this->positions[$this->pos_serial++]=$pos;
 					$this->deposit -=  $pos['entry_price']*$pos['size'];
 					return true;
 				}else{
-					printf( "I want to buy but NO MONEY,PRICE %f DEPOSIT %f\n",($price+$this->spread),$this->deposit);
+					$this->error=sprintf( "Out of Money");
 				}
 			}
-		}elseif($operation=='Sell'){
+		}elseif($order['operate']=='SELL'){
+			if($price = $this->Can_I_Sell($order['price'],$record)){
+				$sell_size=$order['amount'];
+				if(($price+$this->spread)*$sell_size < $this->deposit){
+					$pos=array();
+					$pos['entry_price']=$price-$this->spread;//スプレッド分購入価格から引く
+					$pos['dir']='SHORT';
+					$pos['size']=$sell_size;
+					$pos['entry_time']=$record['dt'];
+					$pos['valid']=true;
+					$this->positions[$this->pos_serial++]=$pos;
+					$this->deposit -=  $pos['entry_price']*$pos['size'];
+					return true;
+				}else{
+					$this->error=sprintf( "Out of Money");
+				}
+			}
 		}
 		return false;
+	}
+	function search_unsettled_positions($dir)
+	{
+		$pids=array();
+		foreach($this->positions as $pid=>$pos){
+			if($pos['dir']==$dir and $pos['valid']){
+				$pids[]=$pid;
+			}
+		}
+		return $pids;
+	}
+	function count_unclosed_position()
+	{
+		$count=0;
+		foreach($this->positions as $pos){
+			if($pos['valid']){
+				$count++;
+			}
+		}
+		return $count;
 
 	}
 	/**
-	 * [loss_cut_position description]
+	 * [close_position description]
 	 * @param  [type] $record [description]
 	 * @return [type]         [description]
 	 */
-	function loss_cut_position($record)
+	function close_position($pid,$price,$amount,$record)
 	{
-		foreach($this->positions as $k=>$p){
-			if($p['valid']){
-				if($p['dir']=='L' and $p['lc_price']>$record['high'] ){
-					$this->deposit += $p['size']*($p['lc_price']-$this->spread);//Unlock money
-					$this->positions[$k]['close_time']=$record['dt'];
-					$this->positions[$k]['valid']=false;
-				}elseif($p['dir']=='S' and $p['lc_price']<$record['low'] ){
-					$this->deposit += $p['size']*($p['entry_price'] - $p['lc_price']+$this->spread);//Unlock money
-					$this->positions[$k]['close_time']=$record['dt'];
-					$this->positions[$k]['valid']=false;
+		if(!isset($this->positions[$pid])){
+			print "BAD PID $pid\n";
+			return;
+		}
+		$pos=$this->positions[$pid];
+		if(!$pos['valid'])return false;
+		$exit_price=0;
+		if($pos['dir']=='LONG'){ //LONG POSITIONS CLOSE
+				if($price){
+						if($price<$record['high']){
+							if($price<$record['low']){
+								$exit_price=$record['low'];
+							}else{
+								$exit_price=$price;
+							}
+						}
+				}else{//without limietd order
+						$exit_price=$record['open'];
 				}
+		}	else{
+			if($price){
+					if($price>$record['low']){
+						if($price>$record['high']){
+							$exit_price=$record['high'];
+						}else{
+							$exit_price=$price;
+						}
+					}
+			}else{//without limietd order
+					$exit_price=$record['open'];
 			}
 		}
+		$exit_size=0;
+		//position size
+		if($exit_price){
+			if($pos['size']==$amount){//All agreement
+				$exit_size=$amount;
+				$this->positions[$pid]['valid']=false;
+				$this->positions[$pid]['exit_time']=$record['dt'];
+				$this->positions[$pid]['exit_price']=$exit_price;
+			}elseif($pos['size']>$amount){
+				$this->positions[$pid]['size']-=$amount;
+				$exit_size=$amount;
+			}else{
+				$exit_size=$pos['size'];//part of agreement
+				$this->positions[$pid]['valid']=false;
+				$this->positions[$pid]['exit_time']=$record['dt'];
+				$this->positions[$pid]['exit_price']=$exit_price;
+			}
+			$this->deposit +=  $exit_price*$exit_size;
+		}
+		return $exit_size;
+	}
 
-	}
-	function close_position($order_price)
+	function dump_position()
 	{
-			$positions=array($order_price);
+		foreach($this->positions as $k=>$p){
+			if(!$p['valid']){
+				printf("$k :CLOSED %s %s %s %f %s %f\n"
+				,$p['dir'],$p['size'],
+				$p['entry_time'],$p['entry_price'],
+				$p['exit_time'],$p['exit_price']);
+			}else{
+				printf("$k :ACTIVE %s %s %s %f\n"
+				,$p['dir'],$p['size'],
+				$p['entry_time'],$p['entry_price']);
+			}
+		}
 	}
+	/**
+	 * [execute_order description]
+	 * @param  [type] $order  [description]
+	 * @param  [type] $record [description]
+	 * @return [type]         [description]
+	 */
+	 //両建てなし　(w/o straddling )
+	function execute_order($record)
+	{
+		foreach($this->orders as &$o){
+			if($o['valid']){
+					if($o['method']=='NOLIMIT'){
+						$o['price']=null;
+					}elseif($o['method']=='OCO'){
+						if($o['operate']=='SELL'){
+							$o['price']=$o['high_price'];//default Take profit
+							if($record['low']<$o['low_price']){//loss cut
+								$o['price']=$o['low_price'];
+							}
+						}else{
+							$o['price']=$o['low_price'];//default Take profit
+							if($record['high']>$o['high_price']){//loss cut
+								$o['price']=$o['high_price'];
+							}
+						}
+					}
+					printf( "\nORDER %s %d %f",$o['operate'],$o['amount'],$o['price']);
+					//Alreadey Have Position
+					if($pids=$this->search_unsettled_positions(($o['operate']=='BUY')?'SHORT':'LONG')){
+						$amount=$o['amount'];
+						foreach($pids as $pid){
+								$amount -= $this->close_position($pid,$o['price'],$amount,$record);
+								if($amount<=0){//This Order Executed
+									$o['valid']=false;
+									break;
+								}
+						}
+					}else{
+						if($this->open_position($o,$record)){
+								$o['valid']=false;
+						}
+					}
+					if(!$o['valid']){
+						if($o['method']=='IFD'){
+							if($o['operate']=='BUY'){
+								$o['price']=$o['high_price'];
+								$o['method']='IF';
+								$o['operate']='SELL';
+							}else{
+								$o['price']=$o['low_price'];
+								$o['method']='IF';
+								$o['operate']='BUY';
+							}
+							$o['valid']=true; //re-use order
+						}elseif($o['method']=='IFO'){
+							print "IFO";
+							if($o['operate']=='BUY'){
+								$o['operate']='SELL';
+							}else{
+								$o['operate']='BUY';
+							}
+							$o['method']='OCO';
+							$o['valid']=true; //re-use order
+						}
+					}
+			}
+		}
+		unset($o);
+	}
+	/**
+	 * count order
+	 * @return int valid order count
+	 */
+	 function count_order()
+ 	{
+ 		$ret=0;
+ 		foreach($this->orders as $o){
+ 			if($o['valid']){
+ 				$ret++;
+ 			}
+ 		}
+ 		print "Current Order count $ret";
+ 		return $ret;
+ 	}
+	function dump_order()
+	{
+		print "\n";
+		foreach($this->orders as $o){
+			printf("%s %s %s %f %f %f %d \n",
+				$o['valid']?'VALID':'----',
+				$o['operate'],
+				$o['method'],
+				$o['price'],
+				$o['low_price'],
+				$o['high_price'],
+				$o['amount']
+			);
+		}
+	}
+}
+
+function test_order()
+{
+	 return array(
+		'valid'=>true,
+		'operate'=>'SELL',//BUY SELL
+		'method'=>'IFO', // IF IFD IFDrel IFO IFOrel  NOLIMIT
+		'price'=>120.4,
+		'low_price'=>120.41, // OCO LOW
+		'high_price'=>120.6,// OCO HIGH
+		'amount'=>1);
+}
+
+/**
+ * Minimum Execute unit tick
+ * @param  [type] $r [description]
+ * @return [type]    [description]
+ */
+function tick($r,$broker,$algorithm)
+{
+	static $n=0;
+	printf( "%s ",$r['dt']);
+	$broker->execute_order($r);
+	//Order for next tick
+	$order=test_order();
+	if($n==0) {
+		$order['operate']='SELL';
+		$order['price']=null;
+		$broker->orders[]=$order;
+	}/*
+	if($n==1) {
+		$order['operate']='BUY';
+		$order['method']='OCO';
+		$broker->orders[]=$order;
+	}*/
+	$n++;
+//	$broker->dump_order();
+//	$order=test_order();
+//	$broker->open_position($order,$r);
+/*
+	if($order=$algorithm->entry($r)){
+		$broker->open_order($order,$r);
+	}
+*/
+	print "\n";
+	$broker->dump_position();
+}
+if(count($argv)<7){
+	die("
+		NOT enough paramaters
+		Require args like this:
+			code from_date to_date deposit spread entry_steratgy exit_sterategy
+\n");
+}else{
+	main_program($argv);
 }
 
 /**
@@ -119,54 +376,27 @@ class Broker
  * @param  mixed $argv [description]
  * @return [type]       [description]
  */
-function main($argv){
+function main_program($argv){
 	require_once('.config'); //database connect param
 	$code=$argv[1];
 	$from_date=$argv[2];
 	$to_date=$argv[3];
 	$strategy=split('/',$argv[6]);
-	$lot_size = 1000;
 
-	$bloker=new Broker($argv[5],$argv[4],$lot_size);//spread,deposit.lot_size
+	$broker=new Broker($argv[5],$argv[4]);//spread,deposit
 
 	require_once("algorithm/{$strategy[0]}.php");
 	try {
 	    $pdo = new PDO($database['dsn'], $database['user'],$database['pass'],$database['opt']);
-			$algorithm= new Trade($pdo,$strategy,$lot_size);
+			$algorithm= new Trade($pdo,$strategy);
 			$algorithm->init();
-	    /*
-	      Back test
-	    */
-	    $sql="select code,dt,high,low  from {$database['table']} where code=? and dt>=? and dt<=? order by dt";
+	    $sql="SELECT code,dt,open,high,low,close
+						FROM {$database['table']}
+						WHERE code=? AND dt>=? AND dt<=? ORDER BY dt";
 	    $stmt = $pdo->prepare($sql);
 	    $stmt->execute(array($code,$from_date,$to_date));
 	    while($r=$stmt->fetch()){
-				//最初にロスカットに該当するかチェック
-				$bloker->loss_cut_position($r);
-				//現在保有中のポジションをクローズするかチェック
-				foreach($bloker->positions as &$p){
-					if($p['valid']){
-						if($profit=$algorithm->take_profit($r)){
-							$p['valid']=false;
-						}
-					}
-				}
-				//新規オーダーの処理
-				foreach($bloker->orders as &$o){
-						if($o['valid']){
-							if($bloker->open_position($o,$r)){
-									$o['valid']=false;
-							}
-							$o['until']--;
-							if($o['until']<=0){
-								$o['valid']=false;
-							}
-						}
-				}
-				//新たにポジションを持つ場合は、次の足でエントリーするためのオーダーを入れる
-				if($operate=$algorithm->entry($r)){
-					$bloker->orders[]=array('valid'=>true,'operate'=>$operate,'price'=>120.0,'lc_price'=>0.5,'lot'=>1,'until'=>1);
-				}
+				tick($r,$broker,$algorithm);
 	    }
 	}catch (PODException $e){
 	    error_log($e->getMessage());
